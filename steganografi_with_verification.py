@@ -1,8 +1,16 @@
+
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from PIL import Image
 import os
 import hashlib # Untuk menghitung hash gambar
+
+# --- TAMBAHAN IMPORT UNTUK KRIPTOGRAFI ---
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import pad, unpad
+from hashlib import sha256 # Digunakan untuk hashing kunci AES
+# --- AKHIR TAMBAHAN IMPORT ---
 
 class SteganographyApp:
     def __init__(self):
@@ -12,7 +20,7 @@ class SteganographyApp:
         
         # Inisialisasi jendela utama
         self.root = ctk.CTk()
-        self.root.title("Alat Steganografi LSB")
+        self.root.title("Alat Steganografi LSB (dengan Enkripsi & Verifikasi)")
         self.root.geometry("800x600")
         self.root.resizable(True, True)
         
@@ -21,6 +29,10 @@ class SteganographyApp:
         self.secret_image_path = ""
         self.verify_image_path = "" # Path untuk gambar yang akan diverifikasi
         
+        # --- TAMBAHAN VARIABEL UNTUK KUNCI ENKRIPSI ---
+        self.encryption_key = ctk.StringVar() # Untuk input kunci enkripsi/dekripsi
+        # --- AKHIR TAMBAHAN VARIABEL ---
+
         # Simulasi database blockchain untuk menyimpan hash gambar yang terdaftar
         # Kunci: hash SHA256 gambar, Nilai: path file (untuk referensi, di dunia nyata bisa metadata lain)
         self.blockchain_registered_hashes = {} 
@@ -88,16 +100,33 @@ class SteganographyApp:
         self.message_textbox = ctk.CTkTextbox(
             encode_frame,
             width=600,
-            height=200,
+            height=120, # Sedikit diubah tinggi untuk memberi ruang kunci
             font=ctk.CTkFont(size=12)
         )
-        self.message_textbox.pack(pady=(0, 20))
+        self.message_textbox.pack(pady=(0, 10)) # Sedikit diubah pady
         
+        # --- TAMBAHAN INPUT KUNCI ENKRIPSI ---
+        key_label_encode = ctk.CTkLabel(
+            encode_frame,
+            text="Masukkan Kunci Enkripsi (min. 16 karakter):",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        key_label_encode.pack(pady=(10, 5))
+        self.key_entry_encode = ctk.CTkEntry(
+            encode_frame,
+            width=600,
+            font=ctk.CTkFont(size=12),
+            textvariable=self.encryption_key,
+            show="*"
+        )
+        self.key_entry_encode.pack(pady=(0, 20))
+        # --- AKHIR TAMBAHAN INPUT KUNCI ---
+
         # Tombol untuk menyembunyikan pesan dan menyimpan
         self.encode_btn = ctk.CTkButton(
             encode_frame,
             text="🔒 Sembunyikan & Simpan...",
-            command=self.encode_message,
+            command=self.hide_message_with_encryption, # <--- UBAH COMMAND INI
             font=ctk.CTkFont(size=14, weight="bold"),
             height=40,
             fg_color="green",
@@ -128,11 +157,27 @@ class SteganographyApp:
         )
         self.secret_path_label.pack(pady=(0, 15))
         
+        # --- TAMBAHAN INPUT KUNCI DEKRIPSI ---
+        key_label_decode = ctk.CTkLabel(
+            decode_frame,
+            text="Masukkan Kunci Dekripsi:",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        key_label_decode.pack(pady=(10, 5))
+        self.key_entry_decode = ctk.CTkEntry(
+            decode_frame,
+            width=600,
+            font=ctk.CTkFont(size=12),
+            show="*"
+        )
+        self.key_entry_decode.pack(pady=(0, 20))
+        # --- AKHIR TAMBAHAN INPUT KUNCI ---
+
         # Tombol untuk mengekstrak pesan
         self.decode_btn = ctk.CTkButton(
             decode_frame,
             text="🔓 Ekstrak Pesan Sekarang",
-            command=self.decode_message,
+            command=self.extract_message_with_decryption, # <--- UBAH COMMAND INI
             font=ctk.CTkFont(size=14, weight="bold"),
             height=40,
             fg_color="orange",
@@ -152,7 +197,7 @@ class SteganographyApp:
         self.result_textbox = ctk.CTkTextbox(
             decode_frame,
             width=600,
-            height=200,
+            height=120, # Sedikit diubah tinggi
             font=ctk.CTkFont(size=12),
             state="disabled"
         )
@@ -265,22 +310,64 @@ class SteganographyApp:
                 text_color="gray"
             )
             
-    def encode_message_to_image(self, image_path, secret_message):
+    # --- FUNGSI KRIPTOGRAFI ---
+    def encrypt_message(self, message_bytes, key_str):
         """
-        Fungsi inti untuk menyembunyikan pesan ke dalam gambar
-        menggunakan teknik LSB (Least Significant Bit)
+        Mengenkripsi pesan (dalam bentuk bytes) menggunakan AES-256 (mode CBC).
+        Key_str akan di-hash menjadi kunci AES yang valid.
+        Mengembalikan IV + Ciphertext.
+        """
+        try:
+            # Menggunakan SHA256 dari key_str untuk menghasilkan kunci AES yang deterministik
+            # AES-256 memerlukan kunci 32 byte.
+            key_hash = sha256(key_str.encode('utf-8')).digest()[:32]
+
+            cipher = AES.new(key_hash, AES.MODE_CBC)
+            # Pesan harus di-padding agar panjangnya kelipatan dari ukuran blok AES (16 byte)
+            ct_bytes = cipher.encrypt(pad(message_bytes, AES.block_size))
+            return cipher.iv + ct_bytes # Menggabungkan IV dengan ciphertext
+        except Exception as e:
+            messagebox.showerror("Error Enkripsi", f"Gagal mengenkripsi pesan: {e}")
+            return None
+
+    def decrypt_message(self, enc_message_bytes, key_str):
+        """
+        Mendekripsi pesan (dalam bentuk IV + Ciphertext bytes) menggunakan AES-256 (mode CBC).
+        Key_str akan di-hash menjadi kunci AES yang valid.
+        Mengembalikan plaintext (dalam bentuk bytes).
+        """
+        try:
+            key_hash = sha256(key_str.encode('utf-8')).digest()[:32]
+
+            # IV adalah 16 byte pertama dari enc_message_bytes
+            iv = enc_message_bytes[:AES.block_size]
+            ciphertext = enc_message_bytes[AES.block_size:]
+
+            cipher = AES.new(key_hash, AES.MODE_CBC, iv=iv)
+            pt_bytes = unpad(cipher.decrypt(ciphertext), AES.block_size)
+            return pt_bytes # Mengembalikan dalam bentuk bytes
+        except Exception as e:
+            messagebox.showerror("Error Dekripsi", f"Gagal mendekripsi pesan. Pastikan kunci dan gambar benar. Error: {e}")
+            return None
+
+    def encode_message_to_image(self, image_path, secret_message_bytes): # <--- UBAH PARAMETER INI
+        """
+        Fungsi inti untuk menyembunyikan pesan (dalam bytes) ke dalam gambar
+        menggunakan teknik LSB (Least Significant Bit).
+        Menggunakan prefix 4 byte untuk panjang pesan.
         """
         try:
             # Buka gambar
             img = Image.open(image_path)
             img = img.convert('RGB')  # Pastikan dalam format RGB
             
-            # Tambahkan delimiter untuk menandai akhir pesan
-            delimiter = "###END###"
-            message_with_delimiter = secret_message + delimiter
+            # --- UBAH LOGIKA PESAN ---
+            # Tambahkan panjang pesan sebagai 4 byte pertama dari secret_message_bytes
+            message_with_length_prefix = len(secret_message_bytes).to_bytes(4, 'big') + secret_message_bytes
             
-            # Konversi pesan ke binary
-            binary_message = ''.join(format(ord(char), '08b') for char in message_with_delimiter)
+            # Konversi semua byte (prefix + pesan terenkripsi) ke string binary
+            binary_message = ''.join(format(byte, '08b') for byte in message_with_length_prefix)
+            # --- AKHIR UBAH LOGIKA PESAN ---
             
             # Dapatkan data pixel
             pixels = list(img.getdata())
@@ -329,8 +416,8 @@ class SteganographyApp:
             
     def decode_message_from_image(self, image_path):
         """
-        Fungsi inti untuk mengekstrak pesan dari gambar.
-        Akan melempar ValueError jika delimiter tidak ditemukan (pesan rusak/tidak ada).
+        Fungsi inti untuk mengekstrak pesan (dalam bytes) dari gambar.
+        Akan membaca prefix 4 byte untuk panjang pesan.
         """
         try:
             # Buka gambar
@@ -341,56 +428,73 @@ class SteganographyApp:
             pixels = list(img.getdata())
             
             # Ekstrak bit dari LSB setiap komponen warna
-            binary_message = ""
+            extracted_bits = ""
             
             for pixel in pixels:
                 r, g, b = pixel
                 
                 # Ekstrak LSB dari setiap komponen warna
-                binary_message += str(r & 1)
-                binary_message += str(g & 1)
-                binary_message += str(b & 1)
+                extracted_bits += str(r & 1)
+                extracted_bits += str(g & 1)
+                extracted_bits += str(b & 1)
             
-            # Konversi binary ke string
-            message = ""
-            delimiter = "###END###"
+            # --- UBAH LOGIKA PESAN ---
+            # Pastikan ada cukup bit untuk panjang pesan (4 byte = 32 bit)
+            if len(extracted_bits) < 32:
+                raise ValueError("Gambar tidak mengandung pesan tersembunyi yang valid (panjang prefix tidak ditemukan).")
+
+            # Ekstrak 4 byte pertama untuk mendapatkan panjang pesan
+            length_bits = extracted_bits[:32]
+            message_length = int(length_bits, 2)
+
+            # Hitung total bit yang harus diekstrak (panjang prefix + pesan terenkripsi)
+            total_message_bits = 32 + (message_length * 8)
+
+            # Cek apakah ada cukup bit dalam gambar untuk panjang pesan yang diekspektasikan
+            if len(extracted_bits) < total_message_bits:
+                raise ValueError("Pesan tersembunyi terpotong atau rusak. Panjang pesan yang terdeteksi tidak sesuai.")
+
+            # Ekstrak pesan terenkripsi (dalam bentuk binary string)
+            encrypted_message_binary = extracted_bits[32:total_message_bits]
             
-            # Proses setiap 8 bit sebagai satu karakter
-            for i in range(0, len(binary_message), 8):
-                byte = binary_message[i:i+8]
-                if len(byte) == 8:
-                    char = chr(int(byte, 2))
-                    message += char
-                    
-                    # Cek apakah sudah menemukan delimiter
-                    if message.endswith(delimiter):
-                        # Hapus delimiter dari pesan
-                        message = message[:-len(delimiter)]
-                        return message
-            
-            # Jika tidak menemukan delimiter setelah memproses seluruh gambar
-            raise ValueError("Tidak ditemukan pesan rahasia dalam gambar ini! Mungkin rusak atau tidak ada pesan.")
+            # Konversi binary string kembali ke bytes
+            byte_array = bytearray()
+            for i in range(0, len(encrypted_message_binary), 8):
+                byte = int(encrypted_message_binary[i:i+8], 2)
+                byte_array.append(byte)
+
+            return bytes(byte_array) # Mengembalikan dalam bentuk bytes
+            # --- AKHIR UBAH LOGIKA PESAN ---
             
         except Exception as e:
-            # Tangkap semua exception dan lempar ulang sebagai Exception kustom
-            # agar lebih mudah dibedakan di pemanggil
             raise Exception(f"Error saat decoding: {str(e)}")
             
-    def encode_message(self):
-        """Handler untuk tombol encode"""
+    # --- HANDLER BARU UNTUK ENKRIPSI DAN STEGANOGRAFI ---
+    def hide_message_with_encryption(self): # <--- NAMA FUNGSI BARU
+        """Handler untuk tombol encode: mengenkripsi dan menyembunyikan pesan"""
         # Validasi input
         if not self.cover_image_path:
             messagebox.showerror("Error", "Silakan pilih gambar cover terlebih dahulu!")
             return
             
-        message = self.message_textbox.get("1.0", "end-1c").strip()
-        if not message:
+        message_str = self.message_textbox.get("1.0", "end-1c").strip()
+        if not message_str:
             messagebox.showerror("Error", "Silakan masukkan pesan rahasia!")
+            return
+
+        encryption_key = self.key_entry_encode.get().strip()
+        if not encryption_key or len(encryption_key) < 16: # AES-256 sebaiknya pakai kunci yang cukup panjang
+            messagebox.showerror("Error", "Kunci enkripsi harus diisi dan minimal 16 karakter.")
             return
             
         try:
-            # Proses encoding
-            encoded_image = self.encode_message_to_image(self.cover_image_path, message)
+            # 1. Enkripsi pesan (string diubah ke bytes sebelum dienkripsi)
+            encrypted_bytes = self.encrypt_message(message_str.encode('utf-8'), encryption_key)
+            if encrypted_bytes is None: # Cek jika enkripsi gagal
+                return
+
+            # 2. Proses encoding (menyembunyikan bytes terenkripsi)
+            encoded_image = self.encode_message_to_image(self.cover_image_path, encrypted_bytes)
             
             # Dialog untuk menyimpan file
             save_path = filedialog.asksaveasfilename(
@@ -413,30 +517,55 @@ class SteganographyApp:
                 
                 # Reset form
                 self.message_textbox.delete("1.0", "end")
+                self.key_entry_encode.delete(0, "end") # Reset kunci juga
                 self.cover_path_label.configure(text="Belum ada gambar yang dipilih", text_color="gray")
                 self.cover_image_path = "" # Reset path cover image
                 
         except Exception as e:
             messagebox.showerror("Error", str(e))
             
-    def decode_message(self):
-        """Handler untuk tombol decode"""
+    # --- HANDLER BARU UNTUK DEKRIPSI DAN EKSTRAKSI STEGANOGRAFI ---
+    def extract_message_with_decryption(self): # <--- NAMA FUNGSI BARU
+        """Handler untuk tombol decode: mengekstrak dan mendekripsi pesan"""
         # Validasi input
         if not self.secret_image_path:
             messagebox.showerror("Error", "Silakan pilih gambar rahasia terlebih dahulu!")
             return
             
+        decryption_key = self.key_entry_decode.get().strip()
+        if not decryption_key:
+            messagebox.showerror("Error", "Kunci dekripsi tidak boleh kosong.")
+            return
+
         try:
-            # Proses decoding
-            decoded_message = self.decode_message_from_image(self.secret_image_path)
-            
+            # 1. Proses decoding (mengekstrak bytes terenkripsi)
+            extracted_encrypted_bytes = self.decode_message_from_image(self.secret_image_path)
+            if extracted_encrypted_bytes is None: # Jika tidak ada pesan atau error saat ekstraksi LSB
+                 self.result_textbox.configure(state="normal")
+                 self.result_textbox.delete("1.0", "end")
+                 self.result_textbox.insert("1.0", "Tidak ditemukan pesan tersembunyi atau gambar rusak.")
+                 self.result_textbox.configure(state="disabled")
+                 messagebox.showerror("Error", "Tidak ditemukan pesan tersembunyi atau gambar rusak.")
+                 return
+
+            # 2. Dekripsi pesan
+            decrypted_message_bytes = self.decrypt_message(extracted_encrypted_bytes, decryption_key)
+            if decrypted_message_bytes is None: # Cek jika dekripsi gagal
+                self.result_textbox.configure(state="normal")
+                self.result_textbox.delete("1.0", "end")
+                self.result_textbox.insert("1.0", "Gagal mendekripsi. Pastikan kunci dan gambar benar.")
+                self.result_textbox.configure(state="disabled")
+                return
+
+            decoded_message = decrypted_message_bytes.decode('utf-8') # Decode bytes ke string untuk tampilan
+
             # Tampilkan hasil di textbox
             self.result_textbox.configure(state="normal")
             self.result_textbox.delete("1.0", "end")
             self.result_textbox.insert("1.0", decoded_message)
             self.result_textbox.configure(state="disabled")
             
-            messagebox.showinfo("Berhasil!", "Pesan berhasil diekstrak!")
+            messagebox.showinfo("Berhasil!", "Pesan berhasil diekstrak dan didekripsi!")
             
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -473,7 +602,7 @@ class SteganographyApp:
     def verify_image_on_blockchain(self):
         """
         Handler untuk tombol verifikasi di blockchain.
-        Akan memeriksa apakah gambar terdaftar dan apakah integritas pesannya terjaga.
+        Akan memeriksa apakah gambar terdaftar dan apakah integritasnya terjaga.
         """
         if not self.verify_image_path:
             messagebox.showerror("Error", "Silakan pilih gambar untuk diverifikasi terlebih dahulu!")
@@ -494,25 +623,13 @@ class SteganographyApp:
             
             if current_image_hash in self.blockchain_registered_hashes:
                 # Gambar terdaftar di blockchain (simulasi)
-                # original_path_from_blockchain = self.blockchain_registered_hashes[current_image_hash]
-                
-                # Sekarang, coba ekstrak pesan untuk memeriksa integritasnya
-                try:
-                    self.decode_message_from_image(self.verify_image_path)
-                    status_text = "✅ Verifikasi Berhasil: Gambar utuh dan pesan tersembunyi baik!"
-                    status_color = "green"
-                except ValueError: # Ini akan ditangkap jika delimiter tidak ditemukan (pesan rusak/tidak ada)
-                    status_text = "❌ Verifikasi Gagal: Gambar terdaftar, tetapi pesan tersembunyi rusak atau tidak ditemukan."
-                    status_color = "red"
-                except Exception as e: # Tangani error lain saat proses decode
-                    status_text = f"❗ Verifikasi Gagal: Gambar terdaftar, namun error saat membaca pesan. ({e})"
-                    status_color = "red"
-                    
+                status_text = "✅ Verifikasi Berhasil: Gambar ini terdaftar di blockchain dan integritasnya utuh."
+                status_color = "green"
             else:
                 # Gambar tidak terdaftar di blockchain (simulasi)
                 status_text = "❌ Error: Gambar ini TIDAK terdaftar di blockchain kami. Tidak dapat memverifikasi keaslian."
                 status_color = "red"
-            
+                
             self.verify_status_label.configure(
                 text=status_text,
                 text_color=status_color
